@@ -318,6 +318,40 @@ class PodcastController {
   }
 
   /**
+   * GET: /api/podcasts/:id/queue/:episodeDownloadId/move-to-front
+   *
+   * @this {import('../routers/ApiRouter')}
+   *
+   * @param {RequestWithUser} req
+   * @param {Response} res
+   */
+  moveEpisodeDownloadToFront(req, res) {
+    if (!req.user.isAdminOrUp) {
+      Logger.error(`[PodcastController] Non-admin user "${req.user.username}" attempted to reorder download queue`)
+      return res.sendStatus(403)
+    }
+    const success = this.podcastManager.moveDownloadToFront(req.params.episodeDownloadId, req.params.id)
+    res.sendStatus(success ? 200 : 404)
+  }
+
+  /**
+   * GET: /api/podcasts/:id/queue/:episodeDownloadId/remove
+   *
+   * @this {import('../routers/ApiRouter')}
+   *
+   * @param {RequestWithUser} req
+   * @param {Response} res
+   */
+  removeEpisodeDownloadFromQueue(req, res) {
+    if (!req.user.isAdminOrUp) {
+      Logger.error(`[PodcastController] Non-admin user "${req.user.username}" attempted to remove download from queue`)
+      return res.sendStatus(403)
+    }
+    const success = this.podcastManager.removeFromDownloadQueue(req.params.episodeDownloadId, req.params.id)
+    res.sendStatus(success ? 200 : 404)
+  }
+
+  /**
    * GET: /api/podcasts/:id/downloads
    *
    * @this {import('../routers/ApiRouter')}

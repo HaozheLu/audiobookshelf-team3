@@ -52,6 +52,49 @@ class PodcastManager {
   }
 
   /**
+   * Move a pending episode download to the front of the queue so it downloads next.
+   * Only ever touches downloadQueue, never currentDownload.
+   * @param {string} id - PodcastEpisodeDownload.id
+   * @param {string} libraryItemId - the podcast the download must belong to
+   * @returns {boolean} false if id is not currently in the waiting queue for this podcast (already active, finished, or already removed) - not an error
+   */
+  moveDownloadToFront(id, libraryItemId) {
+    const index = this.downloadQueue.findIndex((d) => d.id === id && d.libraryItemId === libraryItemId)
+    if (index < 0) return false
+
+    const [download] = this.downloadQueue.splice(index, 1)
+    this.downloadQueue.unshift(download)
+    Logger.info(`[PodcastManager] Moved download "${download.episodeTitle}" to front of queue`)
+    this.emitDownloadQueueUpdate()
+    return true
+  }
+
+  /**
+   * Remove a pending episode download from the queue before it starts.
+   * Only ever touches downloadQueue, never currentDownload.
+   * @param {string} id - PodcastEpisodeDownload.id
+   * @param {string} libraryItemId - the podcast the download must belong to
+   * @returns {boolean} false if id is not currently in the waiting queue for this podcast - not an error
+   */
+  removeFromDownloadQueue(id, libraryItemId) {
+    const index = this.downloadQueue.findIndex((d) => d.id === id && d.libraryItemId === libraryItemId)
+    if (index < 0) return false
+
+    const [download] = this.downloadQueue.splice(index, 1)
+    Logger.info(`[PodcastManager] Removed download "${download.episodeTitle}" from queue`)
+    this.emitDownloadQueueUpdate()
+    return true
+  }
+
+  /**
+   * Broadcasts the full current queue snapshot so connected queue views stay in sync with the
+   * server, which is the sole source of truth for download order.
+   */
+  emitDownloadQueueUpdate() {
+    SocketAuthority.emitter('episode_download_queue_updated', this.getDownloadQueueDetails())
+  }
+
+  /**
    *
    * @param {import('../models/LibraryItem')} libraryItem
    * @param {import('../utils/podcastUtils').RssPodcastEpisode[]} episodesToDownload

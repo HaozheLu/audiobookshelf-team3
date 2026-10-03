@@ -252,6 +252,8 @@ class ApiRouter {
     this.router.get('/podcasts/:id/checknew', PodcastController.middleware.bind(this), PodcastController.checkNewEpisodes.bind(this))
     this.router.get('/podcasts/:id/downloads', PodcastController.middleware.bind(this), PodcastController.getEpisodeDownloads.bind(this))
     this.router.get('/podcasts/:id/clear-queue', PodcastController.middleware.bind(this), PodcastController.clearEpisodeDownloadQueue.bind(this))
+    this.router.get('/podcasts/:id/queue/:episodeDownloadId/move-to-front', PodcastController.middleware.bind(this), PodcastController.moveEpisodeDownloadToFront.bind(this))
+    this.router.get('/podcasts/:id/queue/:episodeDownloadId/remove', PodcastController.middleware.bind(this), PodcastController.removeEpisodeDownloadFromQueue.bind(this))
     this.router.get('/podcasts/:id/search-episode', PodcastController.middleware.bind(this), PodcastController.findEpisode.bind(this))
     this.router.post('/podcasts/:id/download-episodes', PodcastController.middleware.bind(this), PodcastController.downloadEpisodes.bind(this))
     this.router.post('/podcasts/:id/match-episodes', PodcastController.middleware.bind(this), PodcastController.quickMatchEpisodes.bind(this))

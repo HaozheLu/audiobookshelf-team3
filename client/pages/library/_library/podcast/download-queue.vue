@@ -46,7 +46,7 @@
           </div>
         </template>
 
-        <tables-podcast-download-queue-table v-if="episodeDownloadsQueued.length" :queue="episodeDownloadsQueued"></tables-podcast-download-queue-table>
+        <tables-podcast-download-queue-table v-if="episodeDownloadsQueued.length" :queue="episodeDownloadsQueued" :pending-id="pendingDownloadId" @move-to-front="moveEpisodeToFront" @remove="removeEpisodeFromQueue"></tables-podcast-download-queue-table>
       </div>
     </div>
   </div>
@@ -75,7 +75,8 @@ export default {
     return {
       episodesDownloading: [],
       episodeDownloadsQueued: [],
-      processing: false
+      processing: false,
+      pendingDownloadId: null
     }
   },
   computed: {
@@ -104,6 +105,43 @@ export default {
         this.episodesDownloading = this.episodesDownloading.filter((d) => d.id !== episodeDownload.id)
       }
     },
+    episodeDownloadQueueUpdated(payload) {
+      // Server is the sole source of truth for queue order - always replace local state from the broadcast snapshot
+      this.episodeDownloadsQueued = (payload.queue || []).filter((d) => d.libraryId === this.libraryId)
+      this.episodesDownloading = payload.currentDownload?.libraryId === this.libraryId ? [payload.currentDownload] : []
+    },
+    async moveEpisodeToFront(episodeDownloadId) {
+      const download = this.episodeDownloadsQueued.find((d) => d.id === episodeDownloadId)
+      if (!download || this.pendingDownloadId) return
+      this.pendingDownloadId = episodeDownloadId
+      await this.$axios
+        .$get(`/api/podcasts/${download.libraryItemId}/queue/${episodeDownloadId}/move-to-front`)
+        .catch((error) => {
+          if (error?.response?.status === 404) {
+            this.$toast.info(this.$strings.ToastEpisodeDownloadQueueItemNoLongerPending)
+          } else {
+            console.error('Failed to move episode download to front', error)
+            this.$toast.error(this.$strings.ToastEpisodeDownloadQueueUpdateFailed)
+          }
+        })
+      this.pendingDownloadId = null
+    },
+    async removeEpisodeFromQueue(episodeDownloadId) {
+      const download = this.episodeDownloadsQueued.find((d) => d.id === episodeDownloadId)
+      if (!download || this.pendingDownloadId) return
+      this.pendingDownloadId = episodeDownloadId
+      await this.$axios
+        .$get(`/api/podcasts/${download.libraryItemId}/queue/${episodeDownloadId}/remove`)
+        .catch((error) => {
+          if (error?.response?.status === 404) {
+            this.$toast.info(this.$strings.ToastEpisodeDownloadQueueItemNoLongerPending)
+          } else {
+            console.error('Failed to remove episode download from queue', error)
+            this.$toast.error(this.$strings.ToastEpisodeDownloadQueueUpdateFailed)
+          }
+        })
+      this.pendingDownloadId = null
+    },
     async loadInitialDownloadQueue() {
       this.processing = true
       const queuePayload = await this.$axios.$get(`/api/libraries/${this.libraryId}/episode-downloads`).catch((error) => {
@@ -125,6 +163,7 @@ export default {
       this.$root.socket.on('episode_download_queued', this.episodeDownloadQueued)
       this.$root.socket.on('episode_download_started', this.episodeDownloadStarted)
       this.$root.socket.on('episode_download_finished', this.episodeDownloadFinished)
+      this.$root.socket.on('episode_download_queue_updated', this.episodeDownloadQueueUpdated)
     }
   },
   mounted() {
@@ -134,6 +173,7 @@ export default {
     this.$root.socket.off('episode_download_queued', this.episodeDownloadQueued)
     this.$root.socket.off('episode_download_started', this.episodeDownloadStarted)
     this.$root.socket.off('episode_download_finished', this.episodeDownloadFinished)
+    this.$root.socket.off('episode_download_queue_updated', this.episodeDownloadQueueUpdated)
   }
 }
 </script>
