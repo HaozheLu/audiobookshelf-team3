@@ -29,6 +29,9 @@ class PodcastManager {
     this.downloadQueue = []
     /** @type {PodcastEpisodeDownload} */
     this.currentDownload = null
+    /** @type {PodcastEpisodeDownload[]} */
+    this.failedDownloads = []
+    this.MaxFailedDownloads = 50
 
     this.failedCheckMap = {}
     this.MaxFailedEpisodeChecks = global.MaxFailedEpisodeChecks
@@ -53,17 +56,137 @@ class PodcastManager {
   }
 
   /**
+   * Move a pending episode download to the front of the queue so it downloads next.
+   * Only ever touches downloadQueue, never currentDownload.
+   * @param {string} id - PodcastEpisodeDownload.id
+   * @param {string} libraryItemId - the podcast the download must belong to
+   * @returns {boolean} false if id is not currently in the waiting queue for this podcast (already active, finished, or already removed) - not an error
+   */
+  moveDownloadToFront(id, libraryItemId) {
+    const index = this.downloadQueue.findIndex((d) => d.id === id && d.libraryItemId === libraryItemId)
+    if (index < 0) return false
+
+    const [download] = this.downloadQueue.splice(index, 1)
+    this.downloadQueue.unshift(download)
+    Logger.info(`[PodcastManager] Moved download "${download.episodeTitle}" to front of queue`)
+    this.emitDownloadQueueUpdate()
+    return true
+  }
+
+  /**
+   * Remove a pending episode download from the queue before it starts.
+   * Only ever touches downloadQueue, never currentDownload.
+   * @param {string} id - PodcastEpisodeDownload.id
+   * @param {string} libraryItemId - the podcast the download must belong to
+   * @returns {boolean} false if id is not currently in the waiting queue for this podcast - not an error
+   */
+  removeFromDownloadQueue(id, libraryItemId) {
+    const index = this.downloadQueue.findIndex((d) => d.id === id && d.libraryItemId === libraryItemId)
+    if (index < 0) return false
+
+    const [download] = this.downloadQueue.splice(index, 1)
+    Logger.info(`[PodcastManager] Removed download "${download.episodeTitle}" from queue`)
+    this.emitDownloadQueueUpdate()
+    return true
+  }
+
+  /**
+   * Broadcasts the full current queue snapshot so connected queue views stay in sync with the
+   * server, which is the sole source of truth for download order.
+   */
+  emitDownloadQueueUpdate() {
+    SocketAuthority.emitter('episode_download_queue_updated', this.getDownloadQueueDetails())
+  }
+
+  /**
+   * Keep a bounded history of failed attempts for display and explicit retry.
+   * @param {PodcastEpisodeDownload} podcastEpisodeDownload
+   */
+  retainFailedDownload(podcastEpisodeDownload) {
+    this.failedDownloads.push(podcastEpisodeDownload)
+    if (this.failedDownloads.length > this.MaxFailedDownloads) {
+      this.failedDownloads.splice(0, this.failedDownloads.length - this.MaxFailedDownloads)
+    }
+  }
+
+  /**
+   * Return the reason a new attempt cannot be accepted, or null when it is allowed.
+   * @param {PodcastEpisodeDownload} podcastEpisodeDownload
+   * @returns {'already-active'|'already-queued'|'already-downloaded'|null}
+   */
+  getEpisodeDownloadRefusalReason(podcastEpisodeDownload) {
+    if (this.currentDownload?.hasSameEpisodeIdentity(podcastEpisodeDownload)) {
+      return 'already-active'
+    }
+    if (this.downloadQueue.some((download) => download.hasSameEpisodeIdentity(podcastEpisodeDownload))) {
+      return 'already-queued'
+    }
+    if (podcastEpisodeDownload.libraryItem?.media?.checkHasEpisodeByFeedEpisode?.(podcastEpisodeDownload.rssPodcastEpisode)) {
+      return 'already-downloaded'
+    }
+    return null
+  }
+
+  /**
+   * Retry a retained failure using a fresh library item and a fresh download attempt.
+   * @param {string} id - failed PodcastEpisodeDownload.id
+   * @param {string} libraryId - library the failure must belong to
+   */
+  async retryFailedDownload(id, libraryId) {
+    let failedDownload = this.failedDownloads.find((download) => download.id === id && download.libraryId === libraryId)
+    if (!failedDownload) return { success: false, reason: 'failure-not-found' }
+
+    const libraryItem = await Database.libraryItemModel.getExpandedById(failedDownload.libraryItemId)
+    if (!libraryItem?.media || !libraryItem.isPodcast || libraryItem.libraryId !== libraryId) {
+      return { success: false, reason: 'podcast-not-found' }
+    }
+
+    // Another request may have retried or dismissed this failure while the database lookup ran.
+    failedDownload = this.failedDownloads.find((download) => download.id === id && download.libraryId === libraryId)
+    if (!failedDownload) return { success: false, reason: 'failure-not-found' }
+
+    const [retryResult] = this.downloadPodcastEpisodes(libraryItem, [failedDownload.rssPodcastEpisode], failedDownload.isAutoDownload)
+    if (!retryResult.accepted) {
+      return { success: false, reason: retryResult.reason }
+    }
+
+    this.failedDownloads = this.failedDownloads.filter((download) => download.id !== id)
+    this.emitDownloadQueueUpdate()
+    return {
+      success: true,
+      download: retryResult.download.toJSONForClient()
+    }
+  }
+
+  /**
+   * Dismiss one retained failure without changing active or queued downloads.
+   * @param {string} id - failed PodcastEpisodeDownload.id
+   * @param {string} libraryId - library the failure must belong to
+   * @returns {boolean}
+   */
+  dismissFailedDownload(id, libraryId) {
+    const index = this.failedDownloads.findIndex((download) => download.id === id && download.libraryId === libraryId)
+    if (index < 0) return false
+
+    this.failedDownloads.splice(index, 1)
+    this.emitDownloadQueueUpdate()
+    return true
+  }
+
+  /**
    *
    * @param {import('../models/LibraryItem')} libraryItem
    * @param {import('../utils/podcastUtils').RssPodcastEpisode[]} episodesToDownload
    * @param {boolean} isAutoDownload - If this download was triggered by auto download
    */
-  async downloadPodcastEpisodes(libraryItem, episodesToDownload, isAutoDownload) {
+  downloadPodcastEpisodes(libraryItem, episodesToDownload, isAutoDownload) {
+    const results = []
     for (const ep of episodesToDownload) {
       const newPeDl = new PodcastEpisodeDownload()
       newPeDl.setData(ep, libraryItem, isAutoDownload, libraryItem.libraryId)
-      this.startPodcastEpisodeDownload(newPeDl)
+      results.push(this.startPodcastEpisodeDownload(newPeDl))
     }
+    return results
   }
 
   /**
@@ -71,21 +194,49 @@ class PodcastManager {
    * @param {PodcastEpisodeDownload} podcastEpisodeDownload
    * @returns
    */
-  async startPodcastEpisodeDownload(podcastEpisodeDownload) {
-    if (this.currentDownload) {
-      // Prevent downloading episodes from the same URL for the same library item.
-      // Allow downloading for different library items in case of the same podcast existing in multiple libraries (e.g. different folders)
-      if (this.downloadQueue.some((d) => d.url === podcastEpisodeDownload.url && d.libraryItem.id === podcastEpisodeDownload.libraryItem.id)) {
-        Logger.warn(`[PodcastManager] Episode already in queue: "${this.currentDownload.episodeTitle}"`)
-        return
-      } else if (this.currentDownload.url === podcastEpisodeDownload.url && this.currentDownload.libraryItem.id === podcastEpisodeDownload.libraryItem.id) {
-        Logger.warn(`[PodcastManager] Episode download already in progress for "${podcastEpisodeDownload.episodeTitle}"`)
-        return
+  startPodcastEpisodeDownload(podcastEpisodeDownload) {
+    const refusalReason = this.getEpisodeDownloadRefusalReason(podcastEpisodeDownload)
+    if (refusalReason) {
+      Logger.warn(`[PodcastManager] Refused episode download "${podcastEpisodeDownload.episodeTitle}": ${refusalReason}`)
+      return {
+        accepted: false,
+        reason: refusalReason,
+        download: podcastEpisodeDownload
       }
+    }
+
+    if (this.currentDownload) {
       this.downloadQueue.push(podcastEpisodeDownload)
       SocketAuthority.emitter('episode_download_queued', podcastEpisodeDownload.toJSONForClient())
-      return
+      return {
+        accepted: true,
+        state: 'queued',
+        download: podcastEpisodeDownload,
+        completion: null
+      }
     }
+
+    this.currentDownload = podcastEpisodeDownload
+    podcastEpisodeDownload.setStarted()
+    const completion = this.processPodcastEpisodeDownload(podcastEpisodeDownload)
+    return {
+      accepted: true,
+      state: 'active',
+      download: podcastEpisodeDownload,
+      completion
+    }
+  }
+
+  /**
+   * Run one accepted attempt and always release its task and watcher state afterward.
+   * @param {PodcastEpisodeDownload} podcastEpisodeDownload
+   * @returns {Promise<boolean>} whether the attempt succeeded
+   */
+  async processPodcastEpisodeDownload(podcastEpisodeDownload) {
+    let task = null
+    let success = false
+    /** @type {'transfer'|'probing'|'persistence'} */
+    let failureCategory = 'transfer'
 
     const taskData = {
       libraryId: podcastEpisodeDownload.libraryId,
@@ -100,168 +251,234 @@ class PodcastManager {
       key: 'MessageTaskDownloadingEpisodeDescription',
       subs: [podcastEpisodeDownload.episodeTitle]
     }
-    const task = TaskManager.createAndAddTask('download-podcast-episode', taskTitleString, taskDescriptionString, false, taskData)
 
-    SocketAuthority.emitter('episode_download_started', podcastEpisodeDownload.toJSONForClient())
-    this.currentDownload = podcastEpisodeDownload
+    try {
+      task = TaskManager.createAndAddTask('download-podcast-episode', taskTitleString, taskDescriptionString, false, taskData)
+      SocketAuthority.emitter('episode_download_started', podcastEpisodeDownload.toJSONForClient())
 
-    // If this file already exists then append a uuid to the filename
-    //  e.g. "/tagesschau 20 Uhr.mp3" becomes "/tagesschau 20 Uhr (ep_asdfasdf).mp3"
-    //  this handles podcasts where every title is the same (ref https://github.com/advplyr/audiobookshelf/issues/1802)
-    if (await fs.pathExists(this.currentDownload.targetPath)) {
-      this.currentDownload.setAppendRandomId(true)
-    }
-
-    // Ignores all added files to this dir
-    Watcher.addIgnoreDir(this.currentDownload.libraryItem.path)
-    Watcher.ignoreFilePathsDownloading.add(this.currentDownload.targetPath)
-
-    // Make sure podcast library item folder exists
-    if (!(await fs.pathExists(this.currentDownload.libraryItem.path))) {
-      Logger.warn(`[PodcastManager] Podcast episode download: Podcast folder no longer exists at "${this.currentDownload.libraryItem.path}" - Creating it`)
-      await fs.mkdir(this.currentDownload.libraryItem.path)
-    }
-
-    // Download episode and tag it
-    const ffmpegDownloadResponse = await ffmpegHelpers.downloadPodcastEpisode(this.currentDownload).catch((error) => {
-      Logger.error(`[PodcastManager] Podcast Episode download failed`, error)
-    })
-    let success = !!ffmpegDownloadResponse?.success
-
-    if (success) {
-      // Attempt to ffprobe and add podcast episode audio file
-      success = await this.scanAddPodcastEpisodeAudioFile()
-      if (!success) {
-        Logger.error(`[PodcastManager] Failed to scan and add podcast episode audio file - removing file`)
-        await fs.remove(this.currentDownload.targetPath)
+      // If this file already exists then append a uuid to the filename
+      //  e.g. "/tagesschau 20 Uhr.mp3" becomes "/tagesschau 20 Uhr (ep_asdfasdf).mp3"
+      //  this handles podcasts where every title is the same (ref https://github.com/advplyr/audiobookshelf/issues/1802)
+      if (await fs.pathExists(podcastEpisodeDownload.targetPath)) {
+        podcastEpisodeDownload.setAppendRandomId(true)
       }
-    }
 
-    // If failed due to ffmpeg or ffprobe error, retry without tagging
-    // e.g. RSS feed may have incorrect file extension and file type
-    // See https://github.com/advplyr/audiobookshelf/issues/3837
-    // e.g. Ffmpeg may be download the file without streams causing the ffprobe to fail
-    if (!success && !ffmpegDownloadResponse?.isRequestError) {
-      Logger.info(`[PodcastManager] Retrying episode download without tagging`)
-      // Download episode only
-      success = await downloadFile(this.currentDownload.url, this.currentDownload.targetPath)
-        .then(() => true)
-        .catch((error) => {
-          Logger.error(`[PodcastManager] Podcast Episode download failed`, error)
-          return false
-        })
+      // Ignores all added files to this dir
+      Watcher.addIgnoreDir(podcastEpisodeDownload.libraryItem.path)
+      Watcher.ignoreFilePathsDownloading.add(podcastEpisodeDownload.targetPath)
+
+      // Make sure podcast library item folder exists
+      if (!(await fs.pathExists(podcastEpisodeDownload.libraryItem.path))) {
+        Logger.warn(`[PodcastManager] Podcast episode download: Podcast folder no longer exists at "${podcastEpisodeDownload.libraryItem.path}" - Creating it`)
+        await fs.mkdir(podcastEpisodeDownload.libraryItem.path)
+      }
+
+      // Download episode and tag it
+      const ffmpegDownloadResponse = await ffmpegHelpers.downloadPodcastEpisode(podcastEpisodeDownload).catch((error) => {
+        Logger.error(`[PodcastManager] Podcast Episode download failed`, error)
+      })
+      success = !!ffmpegDownloadResponse?.success
 
       if (success) {
-        success = await this.scanAddPodcastEpisodeAudioFile()
+        const scanResult = await this.scanAddPodcastEpisodeAudioFile(podcastEpisodeDownload)
+        success = scanResult.success
         if (!success) {
+          failureCategory = scanResult.failureCategory
           Logger.error(`[PodcastManager] Failed to scan and add podcast episode audio file - removing file`)
-          await fs.remove(this.currentDownload.targetPath)
+          await this.removeFailedDownloadFile(podcastEpisodeDownload)
         }
       }
-    }
 
-    if (success) {
-      Logger.info(`[PodcastManager] Successfully downloaded podcast episode "${this.currentDownload.episodeTitle}"`)
-      this.currentDownload.setFinished(true)
-      task.setFinished()
-    } else {
-      const taskFailedString = {
-        text: 'Failed',
-        key: 'MessageTaskFailed'
+      // Preserve the existing fallback for ffmpeg or probing failures: download again without tagging.
+      if (!success && !ffmpegDownloadResponse?.isRequestError && failureCategory !== 'persistence') {
+        Logger.info(`[PodcastManager] Retrying episode download without tagging`)
+        failureCategory = 'transfer'
+        success = await this.downloadPodcastEpisodeWithoutTagging(podcastEpisodeDownload)
+          .then(() => true)
+          .catch((error) => {
+            Logger.error(`[PodcastManager] Podcast Episode download failed`, error)
+            return false
+          })
+
+        if (success) {
+          const scanResult = await this.scanAddPodcastEpisodeAudioFile(podcastEpisodeDownload)
+          success = scanResult.success
+          if (!success) {
+            failureCategory = scanResult.failureCategory
+            Logger.error(`[PodcastManager] Failed to scan and add podcast episode audio file - removing file`)
+            await this.removeFailedDownloadFile(podcastEpisodeDownload)
+          }
+        }
       }
-      task.setFailed(taskFailedString)
-      this.currentDownload.setFinished(false)
+    } catch (error) {
+      Logger.error(`[PodcastManager] Unexpected podcast episode download failure`, error)
+      success = false
     }
 
-    TaskManager.taskFinished(task)
+    try {
+      if (success) {
+        Logger.info(`[PodcastManager] Successfully downloaded podcast episode "${podcastEpisodeDownload.episodeTitle}"`)
+        podcastEpisodeDownload.setFinished(true)
+        task?.setFinished()
+      } else {
+        await this.removeFailedDownloadFile(podcastEpisodeDownload)
+        podcastEpisodeDownload.setFinished(false, failureCategory)
+        this.retainFailedDownload(podcastEpisodeDownload)
+        task?.setFailed({
+          text: 'Failed',
+          key: 'MessageTaskFailed'
+        })
+      }
+    } catch (error) {
+      Logger.error(`[PodcastManager] Failed to finalize podcast episode download state`, error)
+    }
 
-    SocketAuthority.emitter('episode_download_finished', this.currentDownload.toJSONForClient())
+    try {
+      if (task) TaskManager.taskFinished(task)
+    } catch (error) {
+      Logger.error(`[PodcastManager] Failed to finalize podcast episode download task`, error)
+    }
 
-    Watcher.removeIgnoreDir(this.currentDownload.libraryItem.path)
+    try {
+      SocketAuthority.emitter('episode_download_finished', podcastEpisodeDownload.toJSONForClient())
+    } catch (error) {
+      Logger.error(`[PodcastManager] Failed to broadcast podcast episode download completion`, error)
+    }
 
-    Watcher.ignoreFilePathsDownloading.delete(this.currentDownload.targetPath)
-    this.currentDownload = null
+    try {
+      Watcher.removeIgnoreDir(podcastEpisodeDownload.libraryItem.path)
+      Watcher.ignoreFilePathsDownloading.delete(podcastEpisodeDownload.targetPath)
+    } catch (error) {
+      Logger.error(`[PodcastManager] Failed to release podcast episode watcher state`, error)
+    }
+
+    if (this.currentDownload?.id === podcastEpisodeDownload.id) {
+      this.currentDownload = null
+    }
     if (this.downloadQueue.length) {
       this.startPodcastEpisodeDownload(this.downloadQueue.shift())
     }
+    try {
+      this.emitDownloadQueueUpdate()
+    } catch (error) {
+      Logger.error(`[PodcastManager] Failed to broadcast podcast download queue update`, error)
+    }
+    return success
+  }
+
+  /**
+   * Existing fallback: download the episode without ffmpeg metadata tagging.
+   * Kept as a method so the workflow can be tested without making a network request.
+   * @param {PodcastEpisodeDownload} podcastEpisodeDownload
+   */
+  downloadPodcastEpisodeWithoutTagging(podcastEpisodeDownload) {
+    return downloadFile(podcastEpisodeDownload.url, podcastEpisodeDownload.targetPath)
+  }
+
+  /**
+   * Remove a failed attempt's partial file without allowing cleanup errors to stop the queue.
+   * @param {PodcastEpisodeDownload} podcastEpisodeDownload
+   */
+  async removeFailedDownloadFile(podcastEpisodeDownload) {
+    await fs.remove(podcastEpisodeDownload.targetPath).catch((error) => {
+      Logger.error(`[PodcastManager] Failed to remove partial podcast episode file "${podcastEpisodeDownload.targetPath}"`, error)
+    })
   }
 
   /**
    * Scans the downloaded audio file, create the podcast episode, remove oldest episode if necessary
-   * @returns {Promise<boolean>} - Returns true if added
+   * @param {PodcastEpisodeDownload} podcastEpisodeDownload
+   * @returns {Promise<{success: boolean, failureCategory: 'probing'|'persistence'|null}>}
    */
-  async scanAddPodcastEpisodeAudioFile() {
-    const libraryFile = new LibraryFile()
-    await libraryFile.setDataFromPath(this.currentDownload.targetPath, this.currentDownload.targetRelPath)
-
-    const audioFile = await this.probeAudioFile(libraryFile)
-    if (!audioFile) {
-      return false
-    }
-
-    const libraryItem = await Database.libraryItemModel.getExpandedById(this.currentDownload.libraryItem.id)
-    if (!libraryItem) {
-      Logger.error(`[PodcastManager] Podcast Episode finished but library item was not found ${this.currentDownload.libraryItem.id}`)
-      return false
-    }
-
-    const podcastEpisode = await Database.podcastEpisodeModel.createFromRssPodcastEpisode(this.currentDownload.rssPodcastEpisode, libraryItem.media.id, audioFile)
-
-    libraryItem.libraryFiles.push(libraryFile.toJSON())
-    // Re-calculating library item size because this wasnt being updated properly for podcasts in v2.20.0 and below
-    let libraryItemSize = 0
-    libraryItem.libraryFiles.forEach((lf) => {
-      if (lf.metadata.size && !isNaN(lf.metadata.size)) {
-        libraryItemSize += Number(lf.metadata.size)
+  async scanAddPodcastEpisodeAudioFile(podcastEpisodeDownload = this.currentDownload) {
+    let libraryFile = null
+    let audioFile = null
+    try {
+      libraryFile = new LibraryFile()
+      await libraryFile.setDataFromPath(podcastEpisodeDownload.targetPath, podcastEpisodeDownload.targetRelPath)
+      audioFile = await this.probeAudioFile(libraryFile)
+      if (!audioFile) {
+        return { success: false, failureCategory: 'probing' }
       }
-    })
-    libraryItem.size = libraryItemSize
-    libraryItem.changed('libraryFiles', true)
+    } catch (error) {
+      Logger.error(`[PodcastManager] Failed to inspect downloaded podcast episode`, error)
+      return { success: false, failureCategory: 'probing' }
+    }
 
-    libraryItem.media.podcastEpisodes.push(podcastEpisode)
+    let libraryItem = null
+    let podcastEpisode = null
+    try {
+      libraryItem = await Database.libraryItemModel.getExpandedById(podcastEpisodeDownload.libraryItem.id)
+      if (!libraryItem) {
+        Logger.error(`[PodcastManager] Podcast Episode finished but library item was not found ${podcastEpisodeDownload.libraryItem.id}`)
+        return { success: false, failureCategory: 'persistence' }
+      }
 
-    if (this.currentDownload.isAutoDownload) {
-      // Check setting maxEpisodesToKeep and remove episode if necessary
-      const numEpisodesWithPubDate = libraryItem.media.podcastEpisodes.filter((ep) => !!ep.publishedAt).length
-      if (libraryItem.media.maxEpisodesToKeep && numEpisodesWithPubDate > libraryItem.media.maxEpisodesToKeep) {
-        Logger.info(`[PodcastManager] # of episodes (${numEpisodesWithPubDate}) exceeds max episodes to keep (${libraryItem.media.maxEpisodesToKeep})`)
-        const episodeToRemove = await this.getRemoveOldestEpisode(libraryItem, podcastEpisode.id)
-        if (episodeToRemove) {
-          // Remove episode from playlists
-          await Database.playlistModel.removeMediaItemsFromPlaylists([episodeToRemove.id])
-          // Remove media progress for this episode
-          await Database.mediaProgressModel.destroy({
-            where: {
-              mediaItemId: episodeToRemove.id
-            }
-          })
-          await episodeToRemove.destroy()
-          libraryItem.media.podcastEpisodes = libraryItem.media.podcastEpisodes.filter((ep) => ep.id !== episodeToRemove.id)
+      podcastEpisode = await Database.podcastEpisodeModel.createFromRssPodcastEpisode(podcastEpisodeDownload.rssPodcastEpisode, libraryItem.media.id, audioFile)
 
-          // Remove library file
-          libraryItem.libraryFiles = libraryItem.libraryFiles.filter((lf) => lf.ino !== episodeToRemove.audioFile.ino)
+      libraryItem.libraryFiles.push(libraryFile.toJSON())
+      // Re-calculating library item size because this wasnt being updated properly for podcasts in v2.20.0 and below
+      let libraryItemSize = 0
+      libraryItem.libraryFiles.forEach((lf) => {
+        if (lf.metadata.size && !isNaN(lf.metadata.size)) {
+          libraryItemSize += Number(lf.metadata.size)
+        }
+      })
+      libraryItem.size = libraryItemSize
+      libraryItem.changed('libraryFiles', true)
+
+      libraryItem.media.podcastEpisodes.push(podcastEpisode)
+
+      if (podcastEpisodeDownload.isAutoDownload) {
+        // Check setting maxEpisodesToKeep and remove episode if necessary
+        const numEpisodesWithPubDate = libraryItem.media.podcastEpisodes.filter((ep) => !!ep.publishedAt).length
+        if (libraryItem.media.maxEpisodesToKeep && numEpisodesWithPubDate > libraryItem.media.maxEpisodesToKeep) {
+          Logger.info(`[PodcastManager] # of episodes (${numEpisodesWithPubDate}) exceeds max episodes to keep (${libraryItem.media.maxEpisodesToKeep})`)
+          const episodeToRemove = await this.getRemoveOldestEpisode(libraryItem, podcastEpisode.id)
+          if (episodeToRemove) {
+            // Remove episode from playlists
+            await Database.playlistModel.removeMediaItemsFromPlaylists([episodeToRemove.id])
+            // Remove media progress for this episode
+            await Database.mediaProgressModel.destroy({
+              where: {
+                mediaItemId: episodeToRemove.id
+              }
+            })
+            await episodeToRemove.destroy()
+            libraryItem.media.podcastEpisodes = libraryItem.media.podcastEpisodes.filter((ep) => ep.id !== episodeToRemove.id)
+
+            // Remove library file
+            libraryItem.libraryFiles = libraryItem.libraryFiles.filter((lf) => lf.ino !== episodeToRemove.audioFile.ino)
+          }
         }
       }
+
+      await libraryItem.save()
+
+      if (libraryItem.media.numEpisodes !== libraryItem.media.podcastEpisodes.length) {
+        libraryItem.media.numEpisodes = libraryItem.media.podcastEpisodes.length
+        await libraryItem.media.save()
+      }
+    } catch (error) {
+      Logger.error(`[PodcastManager] Failed to save downloaded podcast episode`, error)
+      return { success: false, failureCategory: 'persistence' }
     }
 
-    await libraryItem.save()
-
-    if (libraryItem.media.numEpisodes !== libraryItem.media.podcastEpisodes.length) {
-      libraryItem.media.numEpisodes = libraryItem.media.podcastEpisodes.length
-      await libraryItem.media.save()
+    try {
+      SocketAuthority.libraryItemEmitter('item_updated', libraryItem)
+      const podcastEpisodeExpanded = podcastEpisode.toOldJSONExpanded(libraryItem.id)
+      podcastEpisodeExpanded.libraryItem = libraryItem.toOldJSONExpanded()
+      SocketAuthority.emitter('episode_added', podcastEpisodeExpanded)
+    } catch (error) {
+      Logger.error(`[PodcastManager] Failed to broadcast downloaded podcast episode`, error)
     }
 
-    SocketAuthority.libraryItemEmitter('item_updated', libraryItem)
-    const podcastEpisodeExpanded = podcastEpisode.toOldJSONExpanded(libraryItem.id)
-    podcastEpisodeExpanded.libraryItem = libraryItem.toOldJSONExpanded()
-    SocketAuthority.emitter('episode_added', podcastEpisodeExpanded)
-
-    if (this.currentDownload.isAutoDownload) {
+    if (podcastEpisodeDownload.isAutoDownload) {
       // Notifications only for auto downloaded episodes
       NotificationManager.onPodcastEpisodeDownloaded(libraryItem, podcastEpisode)
     }
 
-    return true
+    return { success: true, failureCategory: null }
   }
 
   /**
@@ -534,7 +751,8 @@ class PodcastManager {
 
     return {
       currentDownload: _currentDownload?.toJSONForClient(),
-      queue: this.downloadQueue.filter((item) => !libraryId || item.libraryId === libraryId).map((item) => item.toJSONForClient())
+      queue: this.downloadQueue.filter((item) => !libraryId || item.libraryId === libraryId).map((item) => item.toJSONForClient()),
+      failedDownloads: this.failedDownloads.filter((item) => !libraryId || item.libraryId === libraryId).map((item) => item.toJSONForClient())
     }
   }
 

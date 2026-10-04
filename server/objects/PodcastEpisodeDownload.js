@@ -17,6 +17,7 @@ class PodcastEpisodeDownload {
     this.isAutoDownload = false
     this.isFinished = false
     this.failed = false
+    this.failureCategory = null
 
     this.appendRandomId = false
 
@@ -36,6 +37,7 @@ class PodcastEpisodeDownload {
       libraryId: this.libraryId || null,
       isFinished: this.isFinished,
       failed: this.failed,
+      failureCategory: this.failureCategory,
       appendRandomId: this.appendRandomId,
       startedAt: this.startedAt,
       createdAt: this.createdAt,
@@ -65,6 +67,9 @@ class PodcastEpisodeDownload {
   }
   get episodeTitle() {
     return this.rssPodcastEpisode.title
+  }
+  get episodeGuid() {
+    return this.rssPodcastEpisode?.guid || null
   }
   get targetPath() {
     return filePathToPOSIX(Path.join(this.libraryItem.path, this.targetFilename))
@@ -124,10 +129,35 @@ class PodcastEpisodeDownload {
     this.libraryId = libraryId
   }
 
-  setFinished(success) {
+  setStarted() {
+    this.startedAt = Date.now()
+  }
+
+  /**
+   * Check whether another attempt refers to the same podcast episode.
+   * The attempt IDs are intentionally ignored: retries get a new ID.
+   *
+   * @param {PodcastEpisodeDownload} otherDownload
+   * @returns {boolean}
+   */
+  hasSameEpisodeIdentity(otherDownload) {
+    if (!otherDownload || this.libraryItemId !== otherDownload.libraryItemId) return false
+
+    if (this.episodeGuid && otherDownload.episodeGuid) {
+      return this.episodeGuid === otherDownload.episodeGuid
+    }
+    return this.url === otherDownload.url
+  }
+
+  /**
+   * @param {boolean} success
+   * @param {'transfer'|'probing'|'persistence'|null} failureCategory
+   */
+  setFinished(success, failureCategory = null) {
     this.finishedAt = Date.now()
     this.isFinished = true
     this.failed = !success
+    this.failureCategory = success ? null : failureCategory
   }
 }
 module.exports = PodcastEpisodeDownload

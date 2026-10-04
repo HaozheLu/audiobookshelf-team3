@@ -14,8 +14,9 @@
             <th class="text-left w-32 min-w-32">{{ $strings.LabelEpisode }}</th>
             <th class="text-left px-4">{{ $strings.LabelEpisodeTitle }}</th>
             <th class="text-left px-4 w-48">{{ $strings.LabelPubDate }}</th>
+            <th v-if="userIsAdminOrUp" class="text-left px-4 w-24"></th>
           </tr>
-          <template v-for="downloadQueued in queue">
+          <template v-for="(downloadQueued, index) in queue">
             <tr :key="downloadQueued.id">
               <td class="px-4">
                 <div class="flex items-center">
@@ -38,6 +39,26 @@
                   <p>{{ $dateDistanceFromNow(downloadQueued.publishedAt) }}</p>
                 </div>
               </td>
+              <td v-if="userIsAdminOrUp" class="px-4">
+                <div class="flex items-center justify-end">
+                  <ui-tooltip v-if="index > 0" :text="$strings.LabelMoveToFront" direction="top">
+                    <span
+                      class="material-symbols text-lg cursor-pointer hover:text-white"
+                      :class="pendingId === downloadQueued.id ? 'opacity-50 pointer-events-none' : ''"
+                      @click="$emit('move-to-front', downloadQueued.id)"
+                      >vertical_align_top</span
+                    >
+                  </ui-tooltip>
+                  <ui-tooltip :text="$strings.LabelRemove" direction="top">
+                    <span
+                      class="material-symbols text-lg cursor-pointer hover:text-error ml-3"
+                      :class="pendingId === downloadQueued.id ? 'opacity-50 pointer-events-none' : ''"
+                      @click="$emit('remove', downloadQueued.id)"
+                      >close</span
+                    >
+                  </ui-tooltip>
+                </div>
+              </td>
             </tr>
           </template>
         </table>
@@ -53,12 +74,20 @@ export default {
       type: Array,
       default: () => []
     },
-    libraryItemId: String
+    libraryItemId: String,
+    pendingId: {
+      type: String,
+      default: null
+    }
   },
   data() {
     return {}
   },
-  computed: {},
+  computed: {
+    userIsAdminOrUp() {
+      return this.$store.getters['user/getIsAdminOrUp']
+    }
+  },
   methods: {},
   mounted() {}
 }

@@ -176,3 +176,90 @@ describe('LibraryController.downloadMultiple', () => {
     expect(pathObjects[0].path).to.equal('/test-lib/allowed')
   })
 })
+
+describe('LibraryController failed podcast downloads', () => {
+  function makeReq(overrides = {}) {
+    return {
+      params: { failedDownloadId: 'failure-1' },
+      user: { username: 'admin', isAdminOrUp: true },
+      library: { id: 'lib-1' },
+      ...overrides
+    }
+  }
+
+  function makeRes() {
+    return {
+      json: sinon.spy(),
+      sendStatus: sinon.spy(),
+      status: sinon.stub().returnsThis()
+    }
+  }
+
+  afterEach(() => {
+    sinon.restore()
+  })
+
+  it('returns the accepted retry to an administrator', async () => {
+    const podcastManager = {
+      retryFailedDownload: sinon.stub().resolves({ success: true, download: { id: 'new-attempt' } })
+    }
+    const req = makeReq()
+    const res = makeRes()
+
+    await LibraryController.retryFailedEpisodeDownload.call({ podcastManager }, req, res)
+
+    expect(podcastManager.retryFailedDownload.calledOnceWith('failure-1', 'lib-1')).to.be.true
+    expect(res.json.calledOnceWith({ success: true, download: { id: 'new-attempt' } })).to.be.true
+  })
+
+  it('returns a specific conflict when the episode is already queued', async () => {
+    const podcastManager = {
+      retryFailedDownload: sinon.stub().resolves({ success: false, reason: 'already-queued' })
+    }
+    const req = makeReq()
+    const res = makeRes()
+
+    await LibraryController.retryFailedEpisodeDownload.call({ podcastManager }, req, res)
+
+    expect(res.status.calledOnceWith(409)).to.be.true
+    expect(res.json.firstCall.args[0]).to.deep.equal({
+      error: 'already-queued',
+      message: 'This episode is already in the download queue'
+    })
+  })
+
+  it('does not let a non-admin retry or dismiss failures', async () => {
+    const podcastManager = {
+      retryFailedDownload: sinon.stub(),
+      dismissFailedDownload: sinon.stub()
+    }
+    const req = makeReq({ user: { username: 'listener', isAdminOrUp: false } })
+    const retryRes = makeRes()
+    const dismissRes = makeRes()
+
+    await LibraryController.retryFailedEpisodeDownload.call({ podcastManager }, req, retryRes)
+    LibraryController.dismissFailedEpisodeDownload.call({ podcastManager }, req, dismissRes)
+
+    expect(retryRes.sendStatus.calledOnceWith(403)).to.be.true
+    expect(dismissRes.sendStatus.calledOnceWith(403)).to.be.true
+    expect(podcastManager.retryFailedDownload.called).to.be.false
+    expect(podcastManager.dismissFailedDownload.called).to.be.false
+  })
+
+  it('dismisses an existing failure and returns 404 after it is gone', () => {
+    const podcastManager = {
+      dismissFailedDownload: sinon.stub()
+    }
+    podcastManager.dismissFailedDownload.onFirstCall().returns(true)
+    podcastManager.dismissFailedDownload.onSecondCall().returns(false)
+    const req = makeReq()
+    const firstRes = makeRes()
+    const secondRes = makeRes()
+
+    LibraryController.dismissFailedEpisodeDownload.call({ podcastManager }, req, firstRes)
+    LibraryController.dismissFailedEpisodeDownload.call({ podcastManager }, req, secondRes)
+
+    expect(firstRes.sendStatus.calledOnceWith(200)).to.be.true
+    expect(secondRes.sendStatus.calledOnceWith(404)).to.be.true
+  })
+})
