@@ -301,6 +301,50 @@ class PodcastController {
   }
 
   /**
+   * POST: /api/podcasts/:id/preview-auto-downloads
+   * Body: { feed: { episodes: RssPodcastEpisode[] }, filters?, maxNewEpisodesToDownload? }
+   * @this import('../routers/ApiRouter')
+   * @param {RequestWithLibraryItem} req
+   * @param {Response} res
+   */
+  previewAutomaticDownloads(req, res) {
+    if (!req.user.isAdminOrUp) {
+      Logger.error(`[PodcastController] Non-admin user "${req.user.username}" attempted to preview automatic downloads`)
+      return res.sendStatus(403)
+    }
+
+    const body = req.body
+    if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.feed?.episodes)) {
+      return res.status(400).send('Invalid request body. "feed.episodes" must be an array')
+    }
+    // Accept the normalized RSS shape, including absent titles/types/dates.
+    // Validate enclosure URLs because the existing duplicate check reads them.
+    const invalidEpisode = body.feed.episodes.some((episode) => {
+      if (!episode || typeof episode !== 'object' || Array.isArray(episode)) return true
+      if (typeof episode.enclosure?.url !== 'string' || !episode.enclosure.url.trim()) return true
+      if (episode.publishedAt != null && (typeof episode.publishedAt !== 'number' || !Number.isFinite(episode.publishedAt))) return true
+      return ['title', 'episodeType', 'guid'].some((key) => episode[key] != null && typeof episode[key] !== 'string')
+    })
+    if (invalidEpisode) {
+      return res.status(400).send('Invalid request body. "feed.episodes" must contain parsed RSS episodes with enclosure URLs')
+    }
+
+    const filters = body.filters === undefined ? {} : body.filters
+    if (!filters || typeof filters !== 'object' || Array.isArray(filters)) {
+      return res.status(400).send('Invalid request body. "filters" must be an object')
+    }
+    const filterTypes = { excludeTrailers: 'boolean', excludeBonusEpisodes: 'boolean', excludeTitlePhrase: 'string' }
+    if (Object.keys(filters).some((key) => !Object.prototype.hasOwnProperty.call(filterTypes, key) || typeof filters[key] !== filterTypes[key])) {
+      return res.status(400).send('Invalid request body. Filters must contain boolean exclusions and a string title phrase')
+    }
+    if (body.maxNewEpisodesToDownload !== undefined && (!Number.isInteger(body.maxNewEpisodesToDownload) || body.maxNewEpisodesToDownload < 0)) {
+      return res.status(400).send('Invalid request body. "maxNewEpisodesToDownload" must be a non-negative integer')
+    }
+
+    res.json(this.podcastManager.previewAutomaticDownloads(req.libraryItem, body.feed, filters, body.maxNewEpisodesToDownload))
+  }
+
+  /**
    * GET: /api/podcasts/:id/clear-queue
    *
    * @this {import('../routers/ApiRouter')}

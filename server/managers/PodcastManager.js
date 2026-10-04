@@ -7,6 +7,7 @@ const Watcher = require('../Watcher')
 const fs = require('../libs/fsExtra')
 
 const { getPodcastFeed } = require('../utils/podcastUtils')
+const { selectPodcastEpisodes, getAutomaticEpisodeCutoff } = require('../utils/podcastEpisodeSelection')
 const { removeFile, downloadFile, sanitizeFilename, filePathToPOSIX, getFileTimestampsWithIno } = require('../utils/fileUtils')
 const { levenshteinDistance } = require('../utils/index')
 const opmlParser = require('../utils/parsers/parseOPML')
@@ -547,10 +548,10 @@ class PodcastManager {
 
     // Use latest episode pubDate if exists OR fallback to using lastEpisodeCheck
     //    lastEpisodeCheck will be the current time when adding a new podcast
-    const dateToCheckForEpisodesAfter = latestEpisodePublishedAt || lastEpisodeCheck
+    const dateToCheckForEpisodesAfter = getAutomaticEpisodeCutoff(libraryItem.media)
     Logger.debug(`[PodcastManager] runEpisodeCheck: "${libraryItem.media.title}" checking for episodes after ${new Date(dateToCheckForEpisodesAfter)}`)
 
-    const newEpisodes = await this.checkPodcastForNewEpisodes(libraryItem, dateToCheckForEpisodesAfter, libraryItem.media.maxNewEpisodesToDownload)
+    const newEpisodes = await this.checkPodcastForNewEpisodes(libraryItem, dateToCheckForEpisodesAfter, libraryItem.media.maxNewEpisodesToDownload, libraryItem.media)
     Logger.debug(`[PodcastManager] runEpisodeCheck: ${newEpisodes?.length || 'N/A'} episodes found`)
 
     if (!newEpisodes) {
@@ -592,9 +593,10 @@ class PodcastManager {
    * @param {import('../models/LibraryItem')} podcastLibraryItem
    * @param {number} dateToCheckForEpisodesAfter - Unix timestamp
    * @param {number} maxNewEpisodes
+   * @param {import('../utils/podcastEpisodeSelection').PodcastDownloadFilters} [filters] - Supplied only for automatic checks
    * @returns {Promise<import('../utils/podcastUtils').RssPodcastEpisode[]|null>}
    */
-  async checkPodcastForNewEpisodes(podcastLibraryItem, dateToCheckForEpisodesAfter, maxNewEpisodes = 3) {
+  async checkPodcastForNewEpisodes(podcastLibraryItem, dateToCheckForEpisodesAfter, maxNewEpisodes = 3, filters = {}) {
     if (!podcastLibraryItem.media.feedURL) {
       Logger.error(`[PodcastManager] checkPodcastForNewEpisodes no feed url for ${podcastLibraryItem.media.title} (ID: ${podcastLibraryItem.id})`)
       return null
@@ -615,14 +617,34 @@ class PodcastManager {
       return null
     }
 
-    // Filter new and not already has
-    let newEpisodes = feed.episodes.filter((ep) => ep.publishedAt > dateToCheckForEpisodesAfter && !podcastLibraryItem.media.checkHasEpisodeByFeedEpisode(ep))
+    return selectPodcastEpisodes(
+      feed.episodes,
+      dateToCheckForEpisodesAfter,
+      (ep) => podcastLibraryItem.media.checkHasEpisodeByFeedEpisode(ep),
+      maxNewEpisodes,
+      filters
+    ).episodes
+  }
 
-    if (maxNewEpisodes > 0) {
-      newEpisodes = newEpisodes.slice(0, maxNewEpisodes)
+  /**
+   * Read-only selection from a supplied feed and optional unsaved settings.
+   * Request validation belongs to the controller. No feed fetch or state updates.
+   * @param {import('../models/LibraryItem')} libraryItem
+   * @param {{ episodes: import('../utils/podcastUtils').RssPodcastEpisode[] }} feed
+   * @param {import('../utils/podcastEpisodeSelection').PodcastDownloadFilters} [filters]
+   * @param {number} [maxNewEpisodesToDownload]
+   */
+  previewAutomaticDownloads(libraryItem, feed, filters = {}, maxNewEpisodesToDownload = libraryItem.media.maxNewEpisodesToDownload) {
+    const podcast = libraryItem.media
+    const settings = {
+      excludeTrailers: podcast.excludeTrailers,
+      excludeBonusEpisodes: podcast.excludeBonusEpisodes,
+      excludeTitlePhrase: podcast.excludeTitlePhrase,
+      ...filters
     }
-
-    return newEpisodes
+    const cutoff = getAutomaticEpisodeCutoff(podcast)
+    const selection = selectPodcastEpisodes(feed.episodes, cutoff, (ep) => podcast.checkHasEpisodeByFeedEpisode(ep), maxNewEpisodesToDownload, settings)
+    return { cutoff, ...selection }
   }
 
   /**

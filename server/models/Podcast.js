@@ -47,6 +47,12 @@ class Podcast extends Model {
     this.autoDownloadEpisodes
     /** @type {string} */
     this.autoDownloadSchedule
+    /** @type {boolean} */
+    this.excludeTrailers
+    /** @type {boolean} */
+    this.excludeBonusEpisodes
+    /** @type {string} */
+    this.excludeTitlePhrase
     /** @type {Date} */
     this.lastEpisodeCheck
     /** @type {number} */
@@ -110,6 +116,9 @@ class Podcast extends Model {
         explicit: !!payload.metadata.explicit,
         autoDownloadEpisodes: !!payload.autoDownloadEpisodes,
         autoDownloadSchedule: autoDownloadSchedule || global.ServerSettings.podcastEpisodeSchedule,
+        excludeTrailers: typeof payload.excludeTrailers === 'boolean' ? payload.excludeTrailers : false,
+        excludeBonusEpisodes: typeof payload.excludeBonusEpisodes === 'boolean' ? payload.excludeBonusEpisodes : false,
+        excludeTitlePhrase: typeof payload.excludeTitlePhrase === 'string' ? payload.excludeTitlePhrase.trim() : '',
         lastEpisodeCheck: new Date(),
         maxEpisodesToKeep: 0,
         maxNewEpisodesToDownload: 3,
@@ -148,6 +157,9 @@ class Podcast extends Model {
 
         autoDownloadEpisodes: DataTypes.BOOLEAN,
         autoDownloadSchedule: DataTypes.STRING,
+        excludeTrailers: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+        excludeBonusEpisodes: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+        excludeTitlePhrase: { type: DataTypes.TEXT, allowNull: false, defaultValue: '' },
         lastEpisodeCheck: DataTypes.DATE,
         maxEpisodesToKeep: DataTypes.INTEGER,
         maxNewEpisodesToDownload: DataTypes.INTEGER,
@@ -281,6 +293,20 @@ class Podcast extends Model {
     if (typeof payload.lastEpisodeCheck === 'number' && payload.lastEpisodeCheck !== this.lastEpisodeCheck?.valueOf()) {
       this.lastEpisodeCheck = payload.lastEpisodeCheck
       hasUpdates = true
+    }
+
+    for (const key of ['excludeTrailers', 'excludeBonusEpisodes']) {
+      if (typeof payload[key] === 'boolean' && payload[key] !== this[key]) {
+        this[key] = payload[key]
+        hasUpdates = true
+      }
+    }
+    if (typeof payload.excludeTitlePhrase === 'string') {
+      const phrase = payload.excludeTitlePhrase.trim()
+      if (phrase !== this.excludeTitlePhrase) {
+        this.excludeTitlePhrase = phrase
+        hasUpdates = true
+      }
     }
 
     const numberKeys = ['maxEpisodesToKeep', 'maxNewEpisodesToDownload']
@@ -445,6 +471,9 @@ class Podcast extends Model {
       episodes: this.podcastEpisodes.map((episode) => episode.toOldJSON(libraryItemId)),
       autoDownloadEpisodes: this.autoDownloadEpisodes,
       autoDownloadSchedule: this.autoDownloadSchedule,
+      excludeTrailers: this.excludeTrailers,
+      excludeBonusEpisodes: this.excludeBonusEpisodes,
+      excludeTitlePhrase: this.excludeTitlePhrase,
       lastEpisodeCheck: this.lastEpisodeCheck?.valueOf() || null,
       maxEpisodesToKeep: this.maxEpisodesToKeep,
       maxNewEpisodesToDownload: this.maxNewEpisodesToDownload
@@ -466,6 +495,9 @@ class Podcast extends Model {
       numEpisodes: this.podcastEpisodes?.length || 0,
       autoDownloadEpisodes: this.autoDownloadEpisodes,
       autoDownloadSchedule: this.autoDownloadSchedule,
+      excludeTrailers: this.excludeTrailers,
+      excludeBonusEpisodes: this.excludeBonusEpisodes,
+      excludeTitlePhrase: this.excludeTitlePhrase,
       lastEpisodeCheck: this.lastEpisodeCheck?.valueOf() || null,
       maxEpisodesToKeep: this.maxEpisodesToKeep,
       maxNewEpisodesToDownload: this.maxNewEpisodesToDownload,
