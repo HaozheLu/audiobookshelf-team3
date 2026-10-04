@@ -29,7 +29,50 @@
           </ui-tooltip>
         </div>
 
+        <div v-if="enableAutoDownloadEpisodes" class="mt-4 pt-4 border-t border-white/10">
+          <p class="text-base font-semibold mb-3">{{ $strings.HeaderAutomaticDownloadFilters }}</p>
+          <div class="flex flex-col gap-3">
+            <ui-checkbox cy-id="excludeTrailers" v-model="newExcludeTrailers" :label="$strings.LabelExcludeTrailers" medium checkbox-bg="bg" @input="clearPreview" />
+            <ui-checkbox cy-id="excludeBonusEpisodes" v-model="newExcludeBonusEpisodes" :label="$strings.LabelExcludeBonusEpisodes" medium checkbox-bg="bg" @input="clearPreview" />
+            <ui-text-input-with-label cy-id="excludeTitlePhrase" v-model="newExcludeTitlePhrase" :label="$strings.LabelExcludedTitlePhrase" :placeholder="$strings.PlaceholderExcludedTitlePhrase" trim-whitespace @input="clearPreview" />
+          </div>
+        </div>
+
         <widgets-cron-expression-builder ref="cronExpressionBuilder" v-if="enableAutoDownloadEpisodes" v-model="cronExpression" />
+
+        <div v-if="enableAutoDownloadEpisodes && feedUrl" class="mt-5 pt-4 border-t border-white/10">
+          <div class="flex items-center justify-between gap-4 mb-3">
+            <div>
+              <p class="text-base font-semibold">{{ $strings.HeaderAutomaticDownloadPreview }}</p>
+              <p class="text-xs text-gray-400">{{ $strings.MessageAutomaticDownloadPreviewHelp }}</p>
+            </div>
+            <ui-btn cy-id="previewAutomaticDownloads" small :loading="previewLoading" :disabled="previewLoading" @click="loadPreview">{{ $strings.ButtonPreview }}</ui-btn>
+          </div>
+
+          <widgets-alert v-if="previewError" type="error" class="text-sm mb-3">{{ previewError }}</widgets-alert>
+          <p v-else-if="previewResult && !previewDecisions.length" cy-id="previewEmpty" class="text-sm text-gray-300 py-3">{{ $strings.MessageAutomaticDownloadPreviewEmpty }}</p>
+          <div v-else-if="previewDecisions.length" cy-id="previewResults" class="overflow-x-auto border border-white/10 rounded-sm">
+            <table class="w-full text-sm">
+              <thead class="bg-primary">
+                <tr>
+                  <th class="text-left px-3 py-2">{{ $strings.LabelEpisodeTitle }}</th>
+                  <th class="text-left px-3 py-2 w-32">{{ $strings.LabelStatus }}</th>
+                  <th class="text-left px-3 py-2 w-48">{{ $strings.LabelReason }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(decision, index) in previewDecisions" :key="previewDecisionKey(decision, index)" cy-id="previewRow" class="border-t border-white/10">
+                  <td dir="auto" class="px-3 py-2">
+                    <p>{{ decision.episode.title || $strings.LabelUntitled }}</p>
+                    <p v-if="decision.episode.publishedAt" class="text-xs text-gray-400">{{ $formatDate(decision.episode.publishedAt) }}</p>
+                  </td>
+                  <td class="px-3 py-2" :class="decision.selected ? 'text-success' : 'text-gray-300'">{{ previewStatus(decision) }}</td>
+                  <td class="px-3 py-2 text-gray-300">{{ previewReason(decision.reason) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </template>
     </div>
 
@@ -56,7 +99,13 @@ export default {
       enableAutoDownloadEpisodes: false,
       cronExpression: null,
       newMaxEpisodesToKeep: 0,
-      newMaxNewEpisodesToDownload: 0
+      newMaxNewEpisodesToDownload: 0,
+      newExcludeTrailers: false,
+      newExcludeBonusEpisodes: false,
+      newExcludeTitlePhrase: '',
+      previewLoading: false,
+      previewResult: null,
+      previewError: ''
     }
   },
   watch: {
@@ -103,8 +152,20 @@ export default {
     maxNewEpisodesToDownload() {
       return this.media.maxNewEpisodesToDownload
     },
+    excludeTrailers() {
+      return !!this.media.excludeTrailers
+    },
+    excludeBonusEpisodes() {
+      return !!this.media.excludeBonusEpisodes
+    },
+    excludeTitlePhrase() {
+      return this.media.excludeTitlePhrase || ''
+    },
+    previewDecisions() {
+      return this.previewResult?.decisions || []
+    },
     isUpdated() {
-      return this.autoDownloadSchedule !== this.cronExpression || this.autoDownloadEpisodes !== this.enableAutoDownloadEpisodes || this.maxEpisodesToKeep !== Number(this.newMaxEpisodesToKeep) || this.maxNewEpisodesToDownload !== Number(this.newMaxNewEpisodesToDownload)
+      return this.autoDownloadSchedule !== this.cronExpression || this.autoDownloadEpisodes !== this.enableAutoDownloadEpisodes || this.maxEpisodesToKeep !== Number(this.newMaxEpisodesToKeep) || this.maxNewEpisodesToDownload !== Number(this.newMaxNewEpisodesToDownload) || this.excludeTrailers !== this.newExcludeTrailers || this.excludeBonusEpisodes !== this.newExcludeBonusEpisodes || this.excludeTitlePhrase !== this.newExcludeTitlePhrase.trim()
     }
   },
   methods: {
@@ -121,6 +182,7 @@ export default {
       } else {
         this.newMaxNewEpisodesToDownload = Number(this.newMaxNewEpisodesToDownload)
       }
+      this.clearPreview()
     },
     save() {
       // If custom expression input is focused then unfocus it instead of submitting
@@ -151,8 +213,64 @@ export default {
       if (this.newMaxNewEpisodesToDownload !== this.maxNewEpisodesToDownload) {
         updatePayload.maxNewEpisodesToDownload = this.newMaxNewEpisodesToDownload
       }
+      updatePayload.excludeTrailers = this.newExcludeTrailers
+      updatePayload.excludeBonusEpisodes = this.newExcludeBonusEpisodes
+      updatePayload.excludeTitlePhrase = this.newExcludeTitlePhrase.trim()
 
       this.updateDetails(updatePayload)
+    },
+    clearPreview() {
+      this.previewResult = null
+      this.previewError = ''
+    },
+    async loadPreview() {
+      this.previewLoading = true
+      this.clearPreview()
+      const feedResult = await this.$axios.$post('/api/podcasts/feed', { rssFeed: this.feedUrl }).catch((error) => {
+        console.error('Failed to get podcast feed for preview', error)
+        this.previewError = typeof error?.response?.data === 'string' ? error.response.data : this.$strings.ToastPodcastGetFeedFailed
+        return null
+      })
+      if (!feedResult?.podcast?.episodes) {
+        if (!this.previewError) this.previewError = this.$strings.ToastPodcastGetFeedFailed
+        this.previewLoading = false
+        return
+      }
+
+      const previewPayload = {
+        feed: feedResult.podcast,
+        filters: {
+          excludeTrailers: this.newExcludeTrailers,
+          excludeBonusEpisodes: this.newExcludeBonusEpisodes,
+          excludeTitlePhrase: this.newExcludeTitlePhrase
+        },
+        maxNewEpisodesToDownload: Number(this.newMaxNewEpisodesToDownload)
+      }
+      this.previewResult = await this.$axios.$post(`/api/podcasts/${this.libraryItemId}/preview-auto-downloads`, previewPayload).catch((error) => {
+        console.error('Failed to preview automatic downloads', error)
+        this.previewError = typeof error?.response?.data === 'string' ? error.response.data : this.$strings.ToastAutomaticDownloadPreviewFailed
+        return null
+      })
+      this.previewLoading = false
+    },
+    previewStatus(decision) {
+      if (decision.selected) return this.$strings.LabelSelected
+      if (decision.eligible) return this.$strings.LabelNotSelected
+      return this.$strings.LabelExcluded
+    },
+    previewReason(reason) {
+      const keys = {
+        trailer: 'ReasonPodcastTrailer',
+        bonus: 'ReasonPodcastBonus',
+        'title-phrase': 'ReasonPodcastTitlePhrase',
+        'date-cutoff': 'ReasonPodcastDateCutoff',
+        'already-downloaded': 'ReasonPodcastAlreadyDownloaded',
+        'count-limit': 'ReasonPodcastCountLimit'
+      }
+      return reason ? this.$strings[keys[reason]] || reason : this.$strings.ReasonPodcastEligible
+    },
+    previewDecisionKey(decision, index) {
+      return decision.episode.guid || decision.episode.enclosure?.url || index
     },
     async updateDetails(updatePayload) {
       this.isProcessing = true
@@ -178,6 +296,10 @@ export default {
       this.cronExpression = this.autoDownloadSchedule
       this.newMaxEpisodesToKeep = this.maxEpisodesToKeep
       this.newMaxNewEpisodesToDownload = this.maxNewEpisodesToDownload
+      this.newExcludeTrailers = this.excludeTrailers
+      this.newExcludeBonusEpisodes = this.excludeBonusEpisodes
+      this.newExcludeTitlePhrase = this.excludeTitlePhrase
+      this.clearPreview()
     }
   },
   mounted() {
