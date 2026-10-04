@@ -12,6 +12,51 @@
   </p>
 </div>
 
+# 17-695 Team Project
+
+This fork contains the team's combined changes to the Audiobookshelf course copy. The original instructions for running the project from source remain below.
+
+## Haozhe Lu — Issue #9: Retry failed podcast downloads
+
+### Change
+
+Failed podcast download attempts are now kept in a server-held list containing the latest 50 failures since startup. The administrator's podcast download-queue page shows the episode and whether it failed during transfer, audio inspection, or saving. An administrator can retry or dismiss each failure.
+
+The existing download workflow was refactored so every download, including a retry, passes through the same duplicate checks, queue, fallback, completion, and cleanup logic. A retry creates a new attempt ID while episode identity is determined by podcast plus episode GUID, with the enclosure URL used when a GUID is unavailable. A retry is refused with an explanation when the episode is already active, queued, downloaded, or its podcast was removed. There are no automatic retry loops.
+
+### How to check
+
+Install the root dependencies and run the full server test suite:
+
+```sh
+npm ci
+npm test
+```
+
+Build the web client:
+
+```sh
+cd client
+npm ci
+npm run generate
+```
+
+The podcast manager and library controller tests check the 50-item limit, failure categories, browser-reload snapshot, retry with a new attempt ID, successful and repeatedly failing retries, rapid duplicate requests, removed podcasts, active/queued/downloaded episodes, dismissal, queue continuation, and the existing untagged-download fallback.
+
+### Results
+
+- Full server suite: 389 passing, 0 failing.
+- Client production build: successful.
+- JSON and diff-format checks: successful.
+
+### RFC changes and remaining work
+
+The implementation follows the issue #9 RFC design. No issue #9 implementation work remains. Failed-download history intentionally resets when the server restarts, as specified in the RFC.
+
+### Team integration
+
+Issue #9 builds on issue #8's server-owned queue snapshot, adding failed attempts to the same snapshot without changing pending-download ordering. Downloads initiated by issue #7 use the same centralized download workflow, so their final failures are recorded and can be retried in the same way.
+
 ## ⚠️ Frontend pull requests are not being reviewed or merged for the existing Vue frontend. The frontend is currently being rewritten and migrated to React and should be available soon.
 
 # About

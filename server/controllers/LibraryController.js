@@ -245,6 +245,55 @@ class LibraryController {
   }
 
   /**
+   * POST: /api/libraries/:id/episode-downloads/:failedDownloadId/retry
+   * Retry a failed podcast episode download.
+   *
+   * @param {LibraryControllerRequest} req
+   * @param {Response} res
+   */
+  async retryFailedEpisodeDownload(req, res) {
+    if (!req.user.isAdminOrUp) {
+      Logger.error(`[LibraryController] Non-admin user "${req.user.username}" attempted to retry a failed podcast download`)
+      return res.sendStatus(403)
+    }
+
+    const result = await this.podcastManager.retryFailedDownload(req.params.failedDownloadId, req.library.id)
+    if (result.success) {
+      return res.json(result)
+    }
+
+    const messages = {
+      'failure-not-found': 'This failed download is no longer available',
+      'podcast-not-found': 'The podcast no longer exists',
+      'already-active': 'This episode is already downloading',
+      'already-queued': 'This episode is already in the download queue',
+      'already-downloaded': 'This episode has already been downloaded'
+    }
+    const status = result.reason === 'failure-not-found' || result.reason === 'podcast-not-found' ? 404 : 409
+    return res.status(status).json({
+      error: result.reason,
+      message: messages[result.reason] || 'The failed download could not be retried'
+    })
+  }
+
+  /**
+   * DELETE: /api/libraries/:id/episode-downloads/:failedDownloadId
+   * Dismiss a failed podcast episode download.
+   *
+   * @param {LibraryControllerRequest} req
+   * @param {Response} res
+   */
+  dismissFailedEpisodeDownload(req, res) {
+    if (!req.user.isAdminOrUp) {
+      Logger.error(`[LibraryController] Non-admin user "${req.user.username}" attempted to dismiss a failed podcast download`)
+      return res.sendStatus(403)
+    }
+
+    const success = this.podcastManager.dismissFailedDownload(req.params.failedDownloadId, req.library.id)
+    return res.sendStatus(success ? 200 : 404)
+  }
+
+  /**
    * PATCH: /api/libraries/:id
    *
    * @this {import('../routers/ApiRouter')}

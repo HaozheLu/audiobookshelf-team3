@@ -47,6 +47,14 @@
         </template>
 
         <tables-podcast-download-queue-table v-if="episodeDownloadsQueued.length" :queue="episodeDownloadsQueued" :pending-id="pendingDownloadId" @move-to-front="moveEpisodeToFront" @remove="removeEpisodeFromQueue"></tables-podcast-download-queue-table>
+
+        <tables-podcast-failed-download-table
+          v-if="failedDownloads.length"
+          :failures="failedDownloads"
+          :pending-id="pendingFailureId"
+          @retry="retryFailedDownload"
+          @dismiss="dismissFailedDownload"
+        ></tables-podcast-failed-download-table>
       </div>
     </div>
   </div>
@@ -75,8 +83,10 @@ export default {
     return {
       episodesDownloading: [],
       episodeDownloadsQueued: [],
+      failedDownloads: [],
       processing: false,
-      pendingDownloadId: null
+      pendingDownloadId: null,
+      pendingFailureId: null
     }
   },
   computed: {
@@ -109,6 +119,7 @@ export default {
       // Server is the sole source of truth for queue order - always replace local state from the broadcast snapshot
       this.episodeDownloadsQueued = (payload.queue || []).filter((d) => d.libraryId === this.libraryId)
       this.episodesDownloading = payload.currentDownload?.libraryId === this.libraryId ? [payload.currentDownload] : []
+      this.failedDownloads = (payload.failedDownloads || []).filter((d) => d.libraryId === this.libraryId)
     },
     async moveEpisodeToFront(episodeDownloadId) {
       const download = this.episodeDownloadsQueued.find((d) => d.id === episodeDownloadId)
@@ -142,6 +153,34 @@ export default {
         })
       this.pendingDownloadId = null
     },
+    async retryFailedDownload(failedDownloadId) {
+      if (this.pendingFailureId) return
+      this.pendingFailureId = failedDownloadId
+      await this.$axios
+        .$post(`/api/libraries/${this.libraryId}/episode-downloads/${failedDownloadId}/retry`)
+        .then(() => {
+          this.$toast.success(this.$strings.ToastEpisodeDownloadRetryAccepted)
+        })
+        .catch((error) => {
+          console.error('Failed to retry podcast episode download', error)
+          this.$toast.error(error.response?.data?.message || this.$strings.ToastEpisodeDownloadFailureUpdateFailed)
+        })
+      this.pendingFailureId = null
+    },
+    async dismissFailedDownload(failedDownloadId) {
+      if (this.pendingFailureId) return
+      this.pendingFailureId = failedDownloadId
+      await this.$axios
+        .$delete(`/api/libraries/${this.libraryId}/episode-downloads/${failedDownloadId}`)
+        .then(() => {
+          this.$toast.success(this.$strings.ToastEpisodeDownloadFailureDismissed)
+        })
+        .catch((error) => {
+          console.error('Failed to dismiss podcast episode download failure', error)
+          this.$toast.error(this.$strings.ToastEpisodeDownloadFailureUpdateFailed)
+        })
+      this.pendingFailureId = null
+    },
     async loadInitialDownloadQueue() {
       this.processing = true
       const queuePayload = await this.$axios.$get(`/api/libraries/${this.libraryId}/episode-downloads`).catch((error) => {
@@ -151,6 +190,7 @@ export default {
       })
       this.processing = false
       this.episodeDownloadsQueued = queuePayload?.queue || []
+      this.failedDownloads = queuePayload?.failedDownloads || []
 
       if (queuePayload?.currentDownload) {
         this.episodesDownloading.push(queuePayload.currentDownload)
